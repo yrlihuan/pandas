@@ -74,41 +74,58 @@ try:
 except NameError: # py3
     basestring = str
 
-def ints_to_pydatetime(ndarray[int64_t] arr, tz=None):
+def ints_to_pydatetime(ndarray[int64_t] arr, tz=None, offset=None, box=False):
+    # convert an i8 repr to an ndarray of datetimes or Timestamp (if box == True)
+
     cdef:
         Py_ssize_t i, n = len(arr)
         pandas_datetimestruct dts
+        object dt
+        int64_t value
         ndarray[object] result = np.empty(n, dtype=object)
+
+    if box and util.is_string_object(offset):
+        from pandas.tseries.frequencies import to_offset
+        offset = to_offset(offset)
 
     if tz is not None:
         if _is_utc(tz):
             for i in range(n):
-                if arr[i] == iNaT:
-                    result[i] = np.nan
+                value = arr[i]
+                if value == iNaT:
+                    result[i] = NaT
                 else:
-                    pandas_datetime_to_datetimestruct(arr[i], PANDAS_FR_ns, &dts)
-                    result[i] = datetime(dts.year, dts.month, dts.day, dts.hour,
-                                         dts.min, dts.sec, dts.us, tz)
+                    pandas_datetime_to_datetimestruct(value, PANDAS_FR_ns, &dts)
+                    if box:
+                        result[i] = create_from_ts(value, dts, tz, offset)
+                    else:
+                        result[i] = datetime(dts.year, dts.month, dts.day, dts.hour,
+                                             dts.min, dts.sec, dts.us, tz)
         elif _is_tzlocal(tz) or _is_fixed_offset(tz):
             for i in range(n):
-                if arr[i] == iNaT:
-                    result[i] = np.nan
+                value = arr[i]
+                if value == iNaT:
+                    result[i] = NaT
                 else:
-                    pandas_datetime_to_datetimestruct(arr[i], PANDAS_FR_ns, &dts)
-                    dt = datetime(dts.year, dts.month, dts.day, dts.hour,
-                                  dts.min, dts.sec, dts.us, tz)
+                    pandas_datetime_to_datetimestruct(value, PANDAS_FR_ns, &dts)
+                    if box:
+                        dt = create_from_ts(value, dts, tz, offset)
+                    else:
+                        dt = datetime(dts.year, dts.month, dts.day, dts.hour,
+                                      dts.min, dts.sec, dts.us, tz)
                     result[i] = dt + tz.utcoffset(dt)
         else:
             trans = _get_transitions(tz)
             deltas = _get_deltas(tz)
             for i in range(n):
 
-                if arr[i] == iNaT:
-                    result[i] = np.nan
+                value = arr[i]
+                if value == iNaT:
+                    result[i] = NaT
                 else:
 
                     # Adjust datetime64 timestamp, recompute datetimestruct
-                    pos = trans.searchsorted(arr[i], side='right') - 1
+                    pos = trans.searchsorted(value, side='right') - 1
                     if _treat_tz_as_pytz(tz):
                         # find right representation of dst etc in pytz timezone
                         new_tz = tz._tzinfos[tz._transition_info[pos]]
@@ -116,19 +133,26 @@ def ints_to_pydatetime(ndarray[int64_t] arr, tz=None):
                         # no zone-name change for dateutil tzs - dst etc represented in single object.
                         new_tz = tz
 
-                    pandas_datetime_to_datetimestruct(arr[i] + deltas[pos],
-                                                      PANDAS_FR_ns, &dts)
-                    result[i] = datetime(dts.year, dts.month, dts.day, dts.hour,
-                                         dts.min, dts.sec, dts.us,
-                                         new_tz)
+                    pandas_datetime_to_datetimestruct(value + deltas[pos], PANDAS_FR_ns, &dts)
+                    if box:
+                        result[i] = create_from_ts(value, dts, new_tz, offset)
+                    else:
+                        result[i] = datetime(dts.year, dts.month, dts.day, dts.hour,
+                                             dts.min, dts.sec, dts.us,
+                                             new_tz)
     else:
         for i in range(n):
-            if arr[i] == iNaT:
-                result[i] = np.nan
+
+            value = arr[i]
+            if value == iNaT:
+                result[i] = NaT
             else:
-                pandas_datetime_to_datetimestruct(arr[i], PANDAS_FR_ns, &dts)
-                result[i] = datetime(dts.year, dts.month, dts.day, dts.hour,
-                                     dts.min, dts.sec, dts.us)
+                pandas_datetime_to_datetimestruct(value, PANDAS_FR_ns, &dts)
+                if box:
+                    result[i] = create_from_ts(value, dts, None, offset)
+                else:
+                    result[i] = datetime(dts.year, dts.month, dts.day, dts.hour,
+                                         dts.min, dts.sec, dts.us)
 
     return result
 
@@ -151,6 +175,19 @@ cdef inline bint _is_fixed_offset(object tz):
 
 
 _zero_time = datetime_time(0, 0)
+
+cdef inline object create_from_ts(int64_t value, pandas_datetimestruct dts, object tzinfo, object offset):
+    """ private constructor from a ts value, dts structure, tzinfo, and offset """
+    cdef _Timestamp ts_base
+    ts_base = _Timestamp.__new__(Timestamp, dts.year, dts.month,
+                                 dts.day, dts.hour, dts.min,
+                                 dts.sec, dts.us, tzinfo)
+
+    ts_base.value = value
+    ts_base.offset = offset
+    ts_base.nanosecond = dts.ps / 1000
+
+    return ts_base
 
 # Python front end to C extension type _Timestamp
 # This serves as the box for datetime64
@@ -182,6 +219,7 @@ class Timestamp(_Timestamp):
     @classmethod
     def utcnow(cls):
         return cls.now('UTC')
+
 
     def __new__(cls, object ts_input, object offset=None, tz=None, unit=None):
         cdef _TSObject ts
