@@ -74,6 +74,22 @@ try:
 except NameError: # py3
     basestring = str
 
+cdef object create_timestamp_from_ts(int value, pandas_datetimestruct dts, object tz, object offset):
+    cdef _Timestamp ts_base
+    ts_base = _Timestamp.__new__(Timestamp, dts.year, dts.month,
+                                 dts.day, dts.hour, dts.min,
+                                 dts.sec, dts.us, tz)
+
+    ts_base.value = value
+    ts_base.offset = offset
+    ts_base.nanosecond = dts.ps / 1000
+
+    return ts_base
+
+cdef object create_datetime_from_ts(int value, pandas_datetimestruct dts, object tz, object offset):
+    return datetime(dts.year, dts.month, dts.day, dts.hour,
+                    dts.min, dts.sec, dts.us, tz)
+
 def ints_to_pydatetime(ndarray[int64_t] arr, tz=None, offset=None, box=False):
     # convert an i8 repr to an ndarray of datetimes or Timestamp (if box == True)
 
@@ -83,10 +99,16 @@ def ints_to_pydatetime(ndarray[int64_t] arr, tz=None, offset=None, box=False):
         object dt
         int64_t value
         ndarray[object] result = np.empty(n, dtype=object)
+        object (*func_create)(int, pandas_datetimestruct, object, object)
 
     if box and util.is_string_object(offset):
         from pandas.tseries.frequencies import to_offset
         offset = to_offset(offset)
+
+    if box:
+      func_create = create_timestamp_from_ts
+    else:
+      func_create = create_datetime_from_ts
 
     if tz is not None:
         if _is_utc(tz):
@@ -96,11 +118,7 @@ def ints_to_pydatetime(ndarray[int64_t] arr, tz=None, offset=None, box=False):
                     result[i] = NaT
                 else:
                     pandas_datetime_to_datetimestruct(value, PANDAS_FR_ns, &dts)
-                    if box:
-                        result[i] = create_from_ts(value, dts, tz, offset)
-                    else:
-                        result[i] = datetime(dts.year, dts.month, dts.day, dts.hour,
-                                             dts.min, dts.sec, dts.us, tz)
+                    result[i] = func_create(value, dts, tz, offset)
         elif _is_tzlocal(tz) or _is_fixed_offset(tz):
             for i in range(n):
                 value = arr[i]
@@ -108,11 +126,7 @@ def ints_to_pydatetime(ndarray[int64_t] arr, tz=None, offset=None, box=False):
                     result[i] = NaT
                 else:
                     pandas_datetime_to_datetimestruct(value, PANDAS_FR_ns, &dts)
-                    if box:
-                        dt = create_from_ts(value, dts, tz, offset)
-                    else:
-                        dt = datetime(dts.year, dts.month, dts.day, dts.hour,
-                                      dts.min, dts.sec, dts.us, tz)
+                    dt = func_create(value, dts, tz, offset)
                     result[i] = dt + tz.utcoffset(dt)
         else:
             trans = _get_transitions(tz)
@@ -134,12 +148,7 @@ def ints_to_pydatetime(ndarray[int64_t] arr, tz=None, offset=None, box=False):
                         new_tz = tz
 
                     pandas_datetime_to_datetimestruct(value + deltas[pos], PANDAS_FR_ns, &dts)
-                    if box:
-                        result[i] = create_from_ts(value, dts, new_tz, offset)
-                    else:
-                        result[i] = datetime(dts.year, dts.month, dts.day, dts.hour,
-                                             dts.min, dts.sec, dts.us,
-                                             new_tz)
+                    result[i] = func_create(value, dts, new_tz, offset)
     else:
         for i in range(n):
 
@@ -148,11 +157,7 @@ def ints_to_pydatetime(ndarray[int64_t] arr, tz=None, offset=None, box=False):
                 result[i] = NaT
             else:
                 pandas_datetime_to_datetimestruct(value, PANDAS_FR_ns, &dts)
-                if box:
-                    result[i] = create_from_ts(value, dts, None, offset)
-                else:
-                    result[i] = datetime(dts.year, dts.month, dts.day, dts.hour,
-                                         dts.min, dts.sec, dts.us)
+                result[i] = func_create(value, dts, None, offset)
 
     return result
 
@@ -175,19 +180,6 @@ cdef inline bint _is_fixed_offset(object tz):
 
 
 _zero_time = datetime_time(0, 0)
-
-cdef inline object create_from_ts(int64_t value, pandas_datetimestruct dts, object tzinfo, object offset):
-    """ private constructor from a ts value, dts structure, tzinfo, and offset """
-    cdef _Timestamp ts_base
-    ts_base = _Timestamp.__new__(Timestamp, dts.year, dts.month,
-                                 dts.day, dts.hour, dts.min,
-                                 dts.sec, dts.us, tzinfo)
-
-    ts_base.value = value
-    ts_base.offset = offset
-    ts_base.nanosecond = dts.ps / 1000
-
-    return ts_base
 
 # Python front end to C extension type _Timestamp
 # This serves as the box for datetime64
